@@ -1,0 +1,824 @@
+output: default
+groups:
+  VDyiZ6:
+    name: Group 1. Extract fields, drop headers and NODATA/SKIPDATA events, assign
+      _time
+    index: 3
+    disabled: false
+  XfjMma:
+    name: Group 2. Drop East-West traffic events
+    disabled: false
+    index: 5
+  XxSQcd:
+    name: Group 3a - Allowed Events. Aggregation for allowed events with high data
+      volume transfers and suppression of other recurring events
+    index: 8
+    disabled: true
+  y52qi0:
+    name: Group 3a - Blocked Events. Suppress events for blocked traffic with the
+      same source/destination/account/protocol combination
+    index: 9
+    disabled: true
+  uuKYPc:
+    disabled: true
+    name: Group 3b. Aggregate events with Aggregations function
+    index: 11
+  Qm8o5n:
+    name: Group 4. Add Geo IP information
+    index: 13
+    disabled: true
+  FjCkzn:
+    name: Group 5a. Look up host information from lookup.
+    index: 16
+    description: Add AWS network asset details from lookup
+    disabled: false
+  Y7wWYy:
+    name: Group 5b. Look up host information from Redis
+    description: Add AWS network asset details from Redis
+    index: 18
+    disabled: true
+  xHyHeV:
+    name: Group 6. Make data Splunk CIM compliant
+    index: 20
+    disabled: false
+  SLGsTU:
+    name: Group 7a. Convert to JSON, remove fields
+    index: 23
+    disabled: true
+  Oba0XG:
+    name: Group 7b. Convert to CSV, remove fields
+    disabled: false
+    index: 25
+asyncFuncTimeout: 1000
+functions:
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: >-
+        Description:  This pipeline enriches AWS VPC Flow logs, aggregates them
+        and makes them Splunk CIM compliant.
+
+
+        Turn off groups you do not use. E.g., if you are not supplying host information for event enrichment, turn off Group 5.
+
+
+        This pipeline works with VPC Flow Logs version 2 (default version with default set of fields). 
+
+        Please refer to AWS documentation on additional logs version information: https://docs.aws.amazon.com/vpc/latest/userguide/flow-logs.html
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: "IMPORTANT: To use Groups 3a and 5b, specify your Redis URL in the Redis
+        functions. Enabling the groups without specifying your Redis URL will
+        result in timeout errors."
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: >-
+        1 (REQUIRED). Extract fields, drop headers and NODATA/SKIPDATA events,
+        assign _time.
+
+        Keep the group below turned on - field extractions are necessary for the rest of the pipeline.
+
+        Do not turn off the group below.
+  - id: serde
+    filter: "true"
+    disabled: false
+    conf:
+      mode: extract
+      type: elff
+      srcField: _raw
+      delimChar: ","
+      quoteChar: '"'
+      escapeChar: \
+      nullValue: "-"
+      fields:
+        - version
+        - account_id
+        - interface_id
+        - srcaddr
+        - dstaddr
+        - srcport
+        - dstport
+        - protocol
+        - packets
+        - bytes
+        - start
+        - end
+        - action
+        - log_status
+      remove:
+        - version
+        - interface_id
+    groupId: VDyiZ6
+    description: Extract fields, remove fields of low value.
+  - id: drop
+    filter: log_status == 'log-status' || log_status == 'NODATA' || log_status ==
+      'SKIPDATA'
+    disabled: false
+    conf: {}
+    description: Remove headers and events with no data
+    final: true
+    groupId: VDyiZ6
+  - id: eval
+    filter: "true"
+    disabled: false
+    conf:
+      add:
+        - name: _time
+          value: start
+        - name: source
+          value: "'vpcflow'"
+        - name: sourcetype
+          value: "'cribl_vpcflow'"
+        - name: __src_dst_pair
+          value: srcaddr + "---" + dstaddr
+        - name: __account_src_dst_protocol_action_combo
+          value: account_id + "---" + srcaddr + "---" + dstaddr + "---" + protocol +
+            "---" + action
+      remove:
+        - start
+        - end
+        - log_status
+    groupId: VDyiZ6
+    description: Assign value of starttime to _time. Create fields used for aggregation.
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: >-
+        2 (optional). Drop East-West (internal) traffic events.
+
+        Don't need events showing accepted traffic between private IPs? Enable the group below to drop those events.
+  - id: drop
+    filter: C.Net.isPrivate(srcaddr) && C.Net.isPrivate(dstaddr) && action=='ACCEPT'
+    disabled: false
+    conf: {}
+    groupId: XfjMma
+    final: true
+    description: Drop events containing records of accepted traffic between private IPs.
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: 3 (optional). Aggregate and suppress similar events
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: >-
+        3a (optional). Aggregate and suppress similar events.
+
+
+        Requires Redis.
+
+
+        For allowed events: aggregate events for where data transfer volume is high, suppress the rest of events with the repeating source/destination/account/action(ACCEPT/REJECT)/protocol combinations.
+
+        This approach is practical to significantly reduce the number of events while still maintaining visibility into large data transfer attempts.
+
+
+        For dropped events: suppress events with repeating source/destination/account/protocol combination.
+  - id: redis
+    filter: action=='ACCEPT'
+    disabled: true
+    conf:
+      commands:
+        - outField: __src_dst_etc_bytes_from_redis
+          keyExpr: __account_src_dst_protocol_action_combo
+          command: hget
+          argsExpr: "'bytes'"
+      authType: none
+      maxBlockSecs: 30
+      url: redis://YOUR-REDIS-URL:6379
+    groupId: XxSQcd
+    description: Check whether the source/destination combo exists in Redis
+  - id: redis
+    filter: action=='ACCEPT' && __src_dst_etc_bytes_from_redis == null && bytes <
+      1000000
+    disabled: true
+    conf:
+      commands:
+        - keyExpr: __account_src_dst_protocol_action_combo
+          command: hmset
+          argsExpr: "['_time',_time,'account_id',account_id,'srcaddr',srcaddr,'dstaddr'\
+            ,dstaddr,'protocol',protocol,'packets',packets,'bytes',bytes,'actio\
+            n',action]"
+        - command: expire
+          keyExpr: __account_src_dst_protocol_action_combo
+          argsExpr: "3600"
+      authType: none
+      maxBlockSecs: 30
+      url: redis://YOUR-REDIS-URL:6379
+    groupId: XxSQcd
+    description: "If the source/destination combo does not exist in Redis and the event
+      shows less than 1MB, add the pair and set suppression window by expiring
+      records in Redis. "
+    final: false
+  - id: eval
+    filter: action=='ACCEPT' && __src_dst_etc_bytes_from_redis == null && bytes <
+      1000000
+    disabled: true
+    conf:
+      remove:
+        - bytes
+        - packets
+        - srcport
+        - dstport
+    groupId: XxSQcd
+    description: Output this first seen event but remove bytes and packets fields. We are
+      after capturing larger data volume transfers here; values for small data
+      volume transfers will not be showing up with this aggregation approach.
+    final: false
+  - id: redis
+    filter: action=='ACCEPT' && __src_dst_etc_bytes_from_redis !== null
+    disabled: true
+    conf:
+      commands:
+        - command: hincrby
+          keyExpr: __account_src_dst_protocol_action_combo
+          argsExpr: "['bytes',bytes]"
+        - command: hincrby
+          keyExpr: __account_src_dst_protocol_action_combo
+          argsExpr: "['packets',packets]"
+        - command: hget
+          keyExpr: __account_src_dst_protocol_action_combo
+          argsExpr: "'bytes'"
+          outField: __aggr_bytes_from_redis
+        - outField: __aggr_packets_from_redis
+          command: hget
+          keyExpr: __account_src_dst_protocol_action_combo
+          argsExpr: "'packets'"
+      authType: none
+      maxBlockSecs: 30
+      url: redis://YOUR-REDIS-URL:6379
+    groupId: XxSQcd
+    description: "If the combination of fields exist, increment bytes "
+  - id: eval
+    filter: action=='ACCEPT' && __src_dst_etc_bytes_from_redis !== null &&
+      __aggr_bytes_from_redis >= 1000000
+    disabled: true
+    conf:
+      add:
+        - name: bytes
+          value: __aggr_bytes_from_redis
+        - name: packets
+          value: __aggr_packets_from_redis
+    groupId: XxSQcd
+    description: If total bytes transferred is at least 1MB, create aggregated event
+    final: false
+  - id: redis
+    filter: action=='ACCEPT' && __src_dst_etc_bytes_from_redis !== null &&
+      __aggr_bytes_from_redis >= 1000000
+    disabled: true
+    conf:
+      commands:
+        - command: del
+          keyExpr: __account_src_dst_protocol_action_combo
+      authType: none
+      maxBlockSecs: 30
+      url: redis://YOUR-REDIS-URL:6379
+    description: "If If total bytes transferred exceeds 1MB, delete combination from Redis
+      now, before the aggregation window exceeded (expiration value set up in
+      Redis is that window). "
+    groupId: XxSQcd
+    final: false
+  - id: drop
+    filter: action=='ACCEPT' && __src_dst_etc_bytes_from_redis !== null && bytes <
+      1000000
+    disabled: true
+    conf: {}
+    groupId: XxSQcd
+    final: true
+    description: Drop the rest of the events - the ones that are not the seen for the first
+      time, are less than 1MB and are not aggregated in the steps above in this
+      Group.
+  - id: redis
+    filter: action == 'REJECT'
+    disabled: true
+    conf:
+      commands:
+        - command: get
+          keyExpr: __account_src_dst_protocol_action_combo
+          outField: __src_dst_etc_from_redis
+      maxBlockSecs: 30
+      url: redis://YOUR-REDIS-URL:6379
+    description: Check whether the source/destination pair exists in Redis
+    groupId: y52qi0
+  - id: drop
+    filter: action == 'REJECT' && __src_dst_etc_from_redis !== null
+    disabled: true
+    conf: {}
+    groupId: y52qi0
+    final: true
+    description: Drop events that already have source/destination pair in Redis.
+  - id: redis
+    filter: action == 'REJECT'
+    disabled: true
+    conf:
+      commands:
+        - command: set
+          keyExpr: __account_src_dst_protocol_action_combo
+          argsExpr: _time
+        - command: expire
+          keyExpr: __account_src_dst_protocol_action_combo
+          argsExpr: "3600"
+      maxBlockSecs: 30
+      url: redis://YOUR-REDIS-URL:6379
+    groupId: y52qi0
+    final: false
+    description: If the source/destination pair does not exist in Redis, add the pair and
+      set suppression window by expiring records in Redis.
+  - id: eval
+    filter: action == 'REJECT'
+    disabled: true
+    conf:
+      keep:
+        - _time
+        - account_id
+        - action
+        - srcaddr
+        - dstaddr
+        - protocol
+        - index
+        - host
+        - source
+        - sourcetype
+      remove:
+        - "*"
+    groupId: y52qi0
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: >-
+        3b (not recommended for VPC Flow, optional). Aggregate events. 
+
+
+        Proceed with caution! Check your VPC Flow Logs aggregation period set up in AWS, consider your VPC Flow Log volume and RAM available on your Worker Nodes.
+
+
+        NOTE: Aggregation functions below are configured to use up to 2GB (under Advanced Settings) of memory per Worker Process per function. Change this to reflect your Worker Nodes RAM configuration.
+  - id: aggregation
+    filter: action=='ACCEPT'
+    disabled: true
+    conf:
+      passthrough: false
+      preserveGroupBys: false
+      sufficientStatsOnly: false
+      metricsMode: false
+      timeWindow: 1800s
+      aggregations:
+        - sum(bytes).as(bytes)
+        - sum(packets).as(packets)
+      cumulative: false
+      flushOnInputClose: true
+      groupbys:
+        - srcaddr
+        - dstaddr
+        - action
+        - account_id
+        - protocol
+        - srcport
+        - dstport
+        - source
+        - sourcetype
+        - index
+        - host
+      flushMemLimit: 2GB
+    groupId: uuKYPc
+    description: Aggregate similar events. Aggregation memory limit is set to 2GB under
+      ADVANCED SETTINGS.
+  - id: aggregation
+    filter: action == 'REJECT'
+    disabled: true
+    conf:
+      passthrough: false
+      preserveGroupBys: false
+      sufficientStatsOnly: false
+      metricsMode: false
+      timeWindow: 1800s
+      aggregations:
+        - sum(bytes).as(bytes)
+        - sum(packets).as(packets)
+        - distinct_count(srcport).as(src_port_count)
+        - distinct_count(dstport).as(dest_port_count)
+      cumulative: false
+      flushOnInputClose: true
+      groupbys:
+        - srcaddr
+        - dstaddr
+        - action
+        - protocol
+        - account_id
+        - source
+        - sourcetype
+        - index
+        - host
+      flushMemLimit: 2GB
+    groupId: uuKYPc
+    description: Aggregate similar REJECT events. Aggregation memory limit is set to 2GB
+      under ADVANCED SETTINGS.
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: >-
+        4 (optional). Add GeoIP info. 
+
+        Turn off the group below if you do not want to use MaxMind GeoLite2 City database to add IP geo location information to events. 
+
+        NOTE: The pack does not include MaxMind database. Please refer to README for instructions on downloading MaxMind database. 
+  - id: geoip
+    filter: "true"
+    disabled: true
+    conf:
+      inField: srcaddr
+      outField: src_geoip
+      file: GeoLite2-City.mmdb
+      additionalFields:
+        - extraInField: dstaddr
+          extraOutField: dst_geoip
+    groupId: Qm8o5n
+    description: "Lookup against MaxMind database. "
+  - id: eval
+    filter: "true"
+    disabled: true
+    conf:
+      keep: []
+      remove:
+        - src_geoip
+        - dst_geoip
+      add:
+        - name: src_country
+          value: src_geoip.country.iso_code
+        - name: src_region
+          value: src_geoip.subdivisions[0].names.en
+        - name: src_city
+          value: src_geoip.city.names.en
+        - name: src_lat
+          value: src_geoip.location.latitude
+        - name: src_lon
+          value: src_geoip.location.longitude
+        - name: dest_country
+          value: dst_geoip.country.iso_code
+        - name: dest_region
+          value: dst_geoip.subdivisions[0].names.en
+        - name: dest_city
+          value: dst_geoip.city.names.en
+        - name: dest_lat
+          value: dst_geoip.location.latitude
+        - name: dest_lon
+          value: dst_geoip.location.longitude
+    groupId: Qm8o5n
+    description: Keeping important fields only. Also removing non-English names for
+      countries, cities, regions/states.
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: 5 (optional). Enrich with host information from lookup or Redis database
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: >-
+        5a (optional). Enrich host information from lookup.
+
+        Lookup assets.csv is used to enrich events with additional container, instances, load balancer and other network assets.
+  - id: lookup
+    filter: "true"
+    disabled: false
+    conf:
+      matchMode: cidr
+      matchType: specific
+      reloadPeriodSec: 60
+      addToEvent: false
+      inFields:
+        - eventField: srcaddr
+          lookupField: ip
+      ignoreCase: false
+      file: assets.csv
+      outFields:
+        - lookupField: hostname
+          eventField: src
+        - lookupField: category
+          eventField: src_category
+        - lookupField: priority
+          eventField: src_priority
+    description: Host information lookup based on source IP address
+    groupId: FjCkzn
+  - id: lookup
+    filter: "true"
+    disabled: false
+    conf:
+      matchMode: cidr
+      matchType: specific
+      reloadPeriodSec: 60
+      addToEvent: false
+      inFields:
+        - eventField: dstaddr
+          lookupField: ip
+      ignoreCase: false
+      file: assets.csv
+      outFields:
+        - lookupField: hostname
+          eventField: dest
+        - lookupField: category
+          eventField: dest_category
+        - lookupField: priority
+          eventField: dest_priority
+    description: Host information lookup based on destination IP address
+    groupId: FjCkzn
+  - id: eval
+    filter: "true"
+    disabled: false
+    conf:
+      add:
+        - name: priority
+          value: >-
+            src_priority == 'critical' || dest_priority == 'critical' ?
+            'critical' : 
+
+            src_priority == 'high' || dest_priority == 'high' ? 'high' :
+
+            src_priority == 'medium' || dest_priority == 'medium' ? 'medium' :
+
+            priority
+    description: "Pick the highest priority between src_priority and dest_priority filed
+      values and assign the value to 'priority' field. "
+    groupId: FjCkzn
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: >-
+        5b (optional). Enrich host information from Redis. 
+
+        Turn on the group below if you send asset information to Redis.
+
+
+        IMPORTANT: Specify URL for your Redis instance. 
+
+
+        Redis hashes are used (https://redis.io/topics/data-types#hashes). IP addresses serve as hash names. Expected fields in hashes: hostname, nametag, priority
+
+
+        Expected priority values: low, medium, high, critical
+
+
+        If both source and destination have priority value set, the highest priority ends up as the value of 'priority' field.
+  - id: redis
+    filter: "true"
+    disabled: true
+    conf:
+      commands:
+        - command: hget
+          keyExpr: srcaddr
+          outField: src_hostname
+          argsExpr: "'hostname'"
+        - outField: src_nametag
+          command: hget
+          keyExpr: srcaddr
+          argsExpr: "'nametag'"
+        - outField: src_priority
+          command: hget
+          keyExpr: srcaddr
+          argsExpr: "'priority'"
+        - outField: dest_hostname
+          command: hget
+          keyExpr: dstaddr
+          argsExpr: "'hostname'"
+        - outField: dest_nametag
+          command: hget
+          keyExpr: dstaddr
+          argsExpr: "'nametag'"
+        - outField: dest_priority
+          command: hget
+          keyExpr: dstaddr
+          argsExpr: "'priority'"
+      authType: none
+      maxBlockSecs: 30
+      url: redis://YOUR-REDIS-URL:6379
+    description: Add host information from Redis
+    groupId: Y7wWYy
+  - id: eval
+    filter: "true"
+    disabled: true
+    conf:
+      add:
+        - name: priority
+          value: >-
+            src_priority == 'critical' || dest_priority == 'critical' ?
+            'critical' : 
+
+            src_priority == 'high' || dest_priority == 'high' ? 'high' :
+
+            src_priority == 'medium' || dest_priority == 'medium' ? 'medium' :
+
+            priority
+        - name: src
+          value: "src_nametag !== null ? src_nametag : src_hostname !==null ?
+            src_hostname : src"
+        - name: dest
+          value: "dest_nametag !== null ? dest_nametag : dest_hostname !==null ?
+            dest_hostname : dest"
+    groupId: Y7wWYy
+    description: Pick the highest priority between src_priority and dest_priority filed
+      values and assign the value to 'priority' field. Assign nametag or
+      hostname values to src and dest fields when available.
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: >-
+        6 (optional). Make data Splunk CIM compliant.
+
+        Turn off the group below if you don't need Splunk CIM compliance.
+
+        If you use Splunk ES or Network Traffic data model, you will need to add tags in Splunk (tag=network and tag=communicate)
+  - id: lookup
+    filter: "true"
+    disabled: false
+    conf:
+      matchMode: exact
+      reloadPeriodSec: 60
+      addToEvent: false
+      inFields:
+        - eventField: protocol
+          lookupField: protocol
+      ignoreCase: false
+      file: protocols.csv
+      outFields:
+        - lookupField: value
+          eventField: transport
+    description: Perform protocol lookup. Add protocol name as 'transport' field to use
+      with Splunk CIM
+    groupId: xHyHeV
+  - id: eval
+    filter: "true"
+    disabled: false
+    conf:
+      add:
+        - name: src_ip
+          value: srcaddr
+        - name: dest_ip
+          value: dstaddr
+        - name: action
+          value: "action == 'ACCEPT' ? 'allowed' : 'blocked'"
+        - name: src_port
+          value: srcport
+        - name: dest_port
+          value: dstport
+        - name: src
+          value: "src ? src : src_ip"
+        - name: dest
+          value: "dest ? dest : dest_ip"
+      remove:
+        - srcaddr
+        - dstaddr
+        - srcport
+        - dstport
+        - protocol
+        - start
+        - end
+        - cribl*
+    description: Map to Splunk Common Information Model (CIM)
+    groupId: xHyHeV
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: >-
+        7 (REQUIRED). Final cleanup. EITHER 7a OR 7b GROUP MUST BE TURNED ON.
+
+        JSON events (option 7a) are more then twice as large as CSV events (option 7b) but they are likely easier to work with in your security analytics tool.
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: 7a. Final cleanup - JSON output (easy to read and analyze; higher data
+        volume).
+  - id: serialize
+    filter: "true"
+    disabled: true
+    conf:
+      type: json
+      dstField: _raw
+      fields:
+        - "!_*"
+        - "!starttime"
+        - "!endtime"
+        - "!cribl_host"
+        - "!source"
+        - "!sourcetype"
+        - "!host"
+        - "!src_priority"
+        - "!dest_priority"
+        - "*"
+    groupId: SLGsTU
+    description: Convert to JSON
+  - id: serde
+    filter: "true"
+    disabled: true
+    conf:
+      mode: reserialize
+      type: json
+      srcField: _raw
+      cleanFields: false
+      remove: []
+      fieldFilterExpr: value !== "" && value !== null
+      keep: []
+    description: Remove fields with null and empty values
+    groupId: SLGsTU
+  - id: eval
+    filter: "true"
+    disabled: true
+    conf:
+      keep:
+        - _raw
+        - _time
+        - index
+        - host
+        - source
+        - sourcetype
+      remove:
+        - cribl*
+        - "*"
+      add: []
+    groupId: SLGsTU
+    description: Remove duplicate and unnecessary fields
+    final: true
+  - id: comment
+    filter: "true"
+    disabled: null
+    conf:
+      comment: >-
+        7b. Final cleanup - CSV format (data volume and storage savings).
+
+
+        Fields in the CSV events:
+
+        account_id action priority bytes packets transport src_port src_port_count src src_ip src_hostname src_nametag src_country src_region src_city src_lat src_lon dest_port dest_port_count dest dest_ip dest_hostname dest_nametag dest_country dest_region dest_city dest_lat dest_lon
+  - id: serialize
+    filter: "true"
+    disabled: false
+    conf:
+      type: csv
+      dstField: _raw
+      delimChar: ","
+      quoteChar: '"'
+      escapeChar: \
+      nullValue: "-"
+      fields:
+        - account_id
+        - action
+        - priority
+        - bytes
+        - packets
+        - transport
+        - src_port
+        - src_port_count
+        - src
+        - src_ip
+        - src_hostname
+        - src_nametag
+        - src_country
+        - src_region
+        - src_city
+        - src_lat
+        - src_lon
+        - dest_port
+        - dest_port_count
+        - dest
+        - dest_ip
+        - dest_hostname
+        - dest_nametag
+        - dest_country
+        - dest_region
+        - dest_city
+        - dest_lat
+        - dest_lon
+      cleanFields: false
+    groupId: Oba0XG
+    description: Put processed fields back into _raw as comma separated values (CSV)
+  - id: eval
+    filter: "true"
+    disabled: false
+    conf:
+      keep:
+        - _raw
+        - _time
+        - index
+        - host
+        - source
+        - sourcetype
+      remove:
+        - cribl*
+        - "*"
+      add: []
+    description: Remove duplicate and unnecessary fields
+    groupId: Oba0XG

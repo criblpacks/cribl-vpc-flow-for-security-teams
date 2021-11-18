@@ -1,0 +1,4 @@
+ip,mac,hostname,nametag,priority,category,owner,bunit,city,country,comment
+127.0.0.1,,localhost,localhost,,,,,,,
+8.8.8.8,,dns.google,google-dns,low,,,,,,
+8.8.4.4,,dns.google,google-dns,low,,,,,,

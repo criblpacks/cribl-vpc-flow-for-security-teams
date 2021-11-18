@@ -1,0 +1,1 @@
+{"name":"cribl-vpc-flow-for-security-teams","version":"0.7.3","author":"Igor Gifrin - Cribl","description":"Add context and geo IP info to VPC Flow Logs, filter logs, aggregate similar events ","displayName":"AWS VPC Flow for Security Teams"}

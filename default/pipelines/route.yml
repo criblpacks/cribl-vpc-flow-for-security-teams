@@ -1,0 +1,22 @@
+id: default
+groups: {}
+routes:
+  - id: jpFbUL
+    name: VPC Flow logs enrichment, filtering, aggregation and Splunk CIM mapping
+    final: false
+    disabled: false
+    pipeline: VPC-Flow-logs-enrichment
+    description: ""
+    clones:
+      - {}
+    filter: __inputId.endsWith('vpc-flow-logs')
+    output: default
+  - id: default
+    name: default
+    final: true
+    disabled: false
+    pipeline: main
+    description: ""
+    clones: []
+    filter: "true"
+    output: default
